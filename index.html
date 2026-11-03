@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>مترجم الفيديو إلى العربية</title>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--card:#f3f3f1;--ac:#0f6e56;--mu:#666}
+@media (prefers-color-scheme:dark){:root{--bg:#161616;--fg:#eee;--card:#242424;--ac:#3ecfa3;--mu:#aaa}}
+body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font-family:system-ui,sans-serif;line-height:1.7;max-width:640px;margin-inline:auto}
+h1{font-size:1.3rem}
+.card{background:var(--card);border-radius:12px;padding:14px;margin:12px 0}
+button,label.b{display:block;width:100%;box-sizing:border-box;text-align:center;background:var(--ac);color:#fff;border:0;border-radius:10px;padding:12px;font-size:1rem;margin-top:8px}
+button:disabled{opacity:.5}
+input[type=file]{display:none}
+video{width:100%;border-radius:10px;background:#000}
+#st{color:var(--mu)}
+progress{width:100%}
+.l{border-bottom:1px solid #8883;padding:6px 0}.l small{color:var(--mu);display:block}
+</style>
+</head>
+<body>
+<h1>مترجم الفيديو إلى العربية</h1>
+<div class="card">
+<label class="b" for="f">١. اختر الفيديو من هاتفك</label>
+<input id="f" type="file" accept="video/*,audio/*">
+<div id="fn" style="margin-top:6px"></div>
+<button id="go" disabled>٢. ابدأ الترجمة</button>
+<p id="st">أول مرة سيحمّل التطبيق نماذج الترجمة (نحو 150 ميغابايت)، وبعدها تُحفظ في المتصفح.</p>
+<progress id="pg" value="0" max="100" hidden></progress>
+</div>
+<div id="out" hidden>
+<video id="v" controls playsinline></video>
+<button id="dl">تحميل ملف الترجمة (SRT)</button>
+<div class="card" id="list"></div>
+</div>
+
+<script type="module">
+import { pipeline, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.0";
+const $ = id => document.getElementById(id);
+let file = null, srt = "";
+const st = t => $("st").textContent = t;
+
+$("f").onchange = e => {
+  file = e.target.files[0];
+  $("fn").textContent = file ? file.name : "";
+  $("go").disabled = !file;
+};
+
+const ts = (s, vtt) => {
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = (s % 60).toFixed(3);
+  const p = n => String(n).padStart(2, "0");
+  return `${p(h)}:${p(m)}:${x.padStart(6, "0")}`.replace(".", vtt ? "." : ",");
+};
+
+async function toAudio(f) {
+  const ctx = new AudioContext();
+  const buf = await ctx.decodeAudioData(await f.arrayBuffer());
+  const off = new OfflineAudioContext(1, Math.ceil(buf.duration * 16000), 16000);
+  const src = off.createBufferSource();
+  src.buffer = buf; src.connect(off.destination); src.start();
+  return (await off.startRendering()).getChannelData(0);
+}
+
+$("go").onclick = async () => {
+  $("go").disabled = true; $("pg").hidden = false;
+  const prog = d => { if (d.status === "progress") $("pg").value = d.progress; };
+  try {
+    st("جارٍ استخراج الصوت من الفيديو…");
+    const audio = await toAudio(file);
+
+    st("جارٍ تحميل نموذج فهم الكلام…");
+    const asr = await pipeline("automatic-speech-recognition", "Xenova/whisper-base", { progress_callback: prog });
+    st("جارٍ تحويل الكلام إلى نص (قد يستغرق عدة دقائق)…");
+    const r = await asr(audio, { task: "translate", return_timestamps: true, chunk_length_s: 30, stride_length_s: 5 });
+
+    st("جارٍ تحميل نموذج الترجمة العربية…");
+    const tr = await pipeline("translation", "Xenova/opus-mt-en-ar", { progress_callback: prog });
+    const segs = [];
+    const chunks = (r.chunks || []).filter(c => c.text.trim());
+    for (let i = 0; i < chunks.length; i++) {
+      st(`جارٍ الترجمة إلى العربية… ${i + 1}/${chunks.length}`);
+      const c = chunks[i];
+      const o = await tr(c.text.trim(), { max_new_tokens: 200 });
+      const a = c.timestamp[0], b = c.timestamp[1] ?? a + 3;
+      segs.push({ a, b, t: o[0].translation_text });
+    }
+
+    srt = segs.map((s, i) => `${i + 1}\n${ts(s.a)} --> ${ts(s.b)}\n${s.t}\n`).join("\n");
+    const vtt = "WEBVTT\n\n" + segs.map(s => `${ts(s.a, 1)} --> ${ts(s.b, 1)}\n${s.t}\n`).join("\n");
+    const v = $("v");
+    v.src = URL.createObjectURL(file);
+    const tk = document.createElement("track");
+    tk.kind = "subtitles"; tk.srclang = "ar"; tk.label = "العربية"; tk.default = true;
+    tk.src = URL.createObjectURL(new Blob([vtt], { type: "text/vtt" }));
+    v.appendChild(tk);
+    $("list").innerHTML = segs.map(s => `<div class="l"><small>${ts(s.a)}</small>${s.t}</div>`).join("");
+    $("out").hidden = false; $("pg").hidden = true;
+    st("تمت الترجمة. ملاحظة: النموذج المجاني قد يخطئ في بعض الجمل.");
+  } catch (e) {
+    st("حدث خطأ: " + e.message + " (جرّب فيديو أقصر)");
+  }
+  $("go").disabled = false;
+};
+
+$("dl").onclick = () => {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([srt], { type: "text/plain" }));
+  a.download = (file.name.replace(/\.[^.]+$/, "") || "video") + ".ar.srt";
+  a.click();
+};
+</script>
+</body>
+</html>
